@@ -290,6 +290,14 @@ static void runner_go(struct snapraid_state* state)
 
 	parser_mapping_start(state);
 
+	/* check if the next task needs a script */
+	int next_need_script = 0;
+	j = tommy_list_head(&state->runner.waiting_list);
+	if (j) {
+		struct snapraid_task* waiting = j->data;
+		next_need_script = runner_need_script(waiting->cmd);
+	}
+
 	state_unlock();
 
 	int f = -1;
@@ -410,18 +418,11 @@ static void runner_go(struct snapraid_state* state)
 
 		if (pid_ret != -1
 			&& WIFEXITED(status)
-			&& WEXITSTATUS(status) == 0) {
-			state_lock();
-			j = tommy_list_head(&state->runner.waiting_list);
-			if (j) {
-				struct snapraid_task* waiting = j->data;
-				if (runner_need_script(waiting->cmd)) {
-					/* postpone */
-					post_script = 0;
-					post_script_skip = 1;
-				}
-			}
-			state_unlock();
+			&& WEXITSTATUS(status) == 0
+			&& next_need_script) {
+			/* postpone */
+			post_script = 0;
+			post_script_skip = 1;
 		}
 	}
 
@@ -748,6 +749,19 @@ void runner_done(struct snapraid_state* state)
 
 static int runner_with_lock(struct snapraid_state* state, int lock, int high_cmd, int cmd, time_t now, sl_t* arg_list, char* msg, size_t msg_size, int* status)
 {
+	if (lock)
+		state_lock();
+
+	const char* snapraid = os_find_engine(state->config.sys_engine);
+	if (!snapraid) {
+		if (lock)
+			state_unlock();
+		log_msg(LVL_ERROR, "snapraid executable not found");
+		sncpy(msg, msg_size, "SnapRAID executable not found");
+		*status = 500;
+		return -1;
+	}
+
 	sncpy(msg, msg_size, "");
 
 	if (now == 0)
@@ -764,21 +778,6 @@ static int runner_with_lock(struct snapraid_state* state, int lock, int high_cmd
 	case CMD_DOWN_IDLE :
 		cmd_translate = CMD_DOWN;
 		break;
-	}
-
-	if (lock)
-		state_lock();
-
-	/* read sys_engine under the lock that protects state->config */
-	const char* snapraid = os_find_engine(state->config.sys_engine);
-	if (!snapraid) {
-		if (lock)
-			state_unlock();
-		task_free(task);
-		log_msg(LVL_ERROR, "snapraid executable not found");
-		sncpy(msg, msg_size, "SnapRAID executable not found");
-		*status = 500;
-		return -1;
 	}
 
 	sl_insert_str(&task->arg_list, snapraid);
@@ -912,9 +911,9 @@ int runner_delete_old_history(struct snapraid_state* state, char* msg, size_t ms
 
 	state_lock();
 
-	int count = tommy_list_count(&state->runner.history_list);
-
 	pulse(state, PULSE_TASKS);
+
+	int count = tommy_list_count(&state->runner.history_list);
 
 	tommy_node* i = tommy_list_head(&state->runner.history_list);
 	while (i) {
